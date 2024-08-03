@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-GZX8P5E1EC"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-GZX8P5E1EC');
+    </script>
+
+    <meta charset="utf-8">
+    <title>シンヤ タケウチ ワークス - CmdFreak - データベースビュアー</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="bootstrap-3.3.7-dist/css/bootstrap.min.css" rel="stylesheet" media="screen">
+</head>
+
+<body>
+
+    <div class="container">
+        <div style="height: 20px"></div>
+        <div>
+            <div class="col-xl-12">
+                <h1>CmdFreak 1.2.0</h1>
+                <div class="row ja">
+                    <h3>CmdFreak概要</h3>
+                    情報システムやアプリケーションソフトウェアの多くは，それらが持つデータの永続化機構としてRDBMS(リレーショナルデータベース管理システム) を用いており，
+                    RDBMSの利用範囲は今後も拡大する傾向にあります。
+                    RDBMSは情報システムやアプリケーションソフトウェアのバックグラウンドサービスとして利用されるケースがほとんどですが， データマイニングや業務・運用の迅速化
+                    を目的として直接RDBMSのオリジナルデータを参照するケースがあります。 
+                    また，RDBMSはアプリケーションソフトウェアの特徴に応じて選定されるため，業務・運用
+                    の中で異なる複数のRDBMSを利用することは一般的なこととなっています。このため，複数のRDBMSを使い分けるユーザーにとって次の問題が存在していました。
+                    <ul>
+                    <li>RDBMSの種類に応じて異なるデータ参照ツールを利用する必要があり，そのツールの学習コストが増大する。</li> 
+                    <li>各クライアントに複数のデータ参照ツールをインストールする必要があり，クライアント数に比例して導入コストが増大する。</li>
+                    </ul>
+                    CmdFreakは，リレーショナルデータベース・ビュアー(データ参照ソフトウェア)であり，上記の問題に対して次のソリューションを提供します。
+                    <ul>
+                    <li>フリーのメジャーRDBMSである，MySQL, PostgreSQL, MariaDBをサポートし， これらのRDBMSに対する共通のユーザーインターフェースを介してデータの参照が可能となり
+                    ます。 RDBMSの種類に応じて異なるツールの操作を学ぶ必要がなく学習コストを抑えることができます。</li>
+                    <li>クライアント側の導入コストが実質的にゼロとなるWebアプリケーションとして動作します。 加えてWebサーバを同梱するオールインワン型のインストーラにより， 通常
+                    のWebアプリケーションのように，事前にWebサーバやスクリプト言語を設定しておく必要はありません。 導入に関わるコストを抑えることができます。</li>
+                    </ul>
+                    CmdFreakはデータベースを参照するための下記の機能を提供します。
+                    <ul>
+                    <li>レコード一覧の表示／ページング</li>
+                    <li>テーブルの選択</li>
+                    <li>テーブル情報の参照</li>
+                    <li>カラムのフィルタリング／ソーティング</li>
+                    <li>DBMSの選択</li>
+                    </ul>
+                    <img src="cmdfreak01.jpg" class="img-responsive" alt="cmdfreak01"/>
+
+                    <h3>システム要件</h3>
+                    CmdFreakは以下の環境で動作します。
+                    <ul><li>動作に必要なCPU: 2GHz以上のクロック周波数で動作するCPU</li></ul>
+                    <ul><li>動作に必要なメモリ容量: 1GBytes以上</li></ul>
+                    <ul><li>導入に必要な空きディスク容量: 20MBytes以上</li></ul>
+                    <ul><li>サポートするオペレーティングシステム／エディション:<br/>
+                    Windows 10<br/>
+                    Windows Server 2016<br/>
+                    Windows Server 2019<br/>
+                    </li></ul>
+                    <ul><li>サポートするWebブラウザ:<br/>
+                    Microsoft Internet Explorer 11<br/>
+                    Microsoft Edge<br/>
+                    Google Chrome<br/>
+                    Mozilla Firefox<br/>
+                    </li></ul>
+                    <ul><li>サポートするDBMS:<br/>
+                    MySQL 5.7 (+ ODBC Driver: MySQL Connector/ODBC 5.3)<br/>
+                    MySQL 8.0 (+ ODBC Driver: MySQL Connector/ODBC 8.0)<br/>
+                    MariaDB 10.3 (+ ODBC Driver: MariaDB Connector/ODBC 3.0)<br/>
+                    MariaDB 10.4 (+ ODBC Driver: MariaDB Connector/ODBC 3.1)<br/>
+                    PostgreSQL 9.6 (+ ODBC Driver: psqlODBC 9.6)<br/>
+                    PostgreSQL 12.2 (+ ODBC Driver: psqlODBC 12.1)<br/>
+                    </li></ul>
+
+                    <h3>変更履歴</h3>
+                    バージョン 1.1.0 ---> 1.2.0
+                    <ul>
+                    <li>GUIにスマートフォンでも見やすいレスポンシブデザインを採用しました。</li>
+                    <li>ユーザー管理機能を追加しました。</li>
+                    </ul>
+                    バージョン 1.0.0 ---> 1.1.0
+                    <ul>
+                    <li>表示可能なレコード数が無制限になりました。</li>
+                    <li>複数ユーザーからの同時操作時の処理性能を改善しました。</li>
+                    </ul>
+
+                    <h3>ダウンロード</h3>
+                    <p><a class="btn btn-primary btn-md" href="cfk120.zip" role="button">1.2.0 Release: 2020/04/22</a></p>
+                    <p><a class="btn btn-primary btn-md" href="cfk110.zip" role="button">1.1.0 Release: 2018/01/28</a></p>
+
+                </div>
+            </div>
+        </div>
+        <div style="height: 50px"></div>
+    </div>
+
+    <script src="jquery-3.2.0.min.js"></script>
+    <script src="bootstrap-3.3.7-dist/js/bootstrap.min.js"></script>
+
+</body>
+</html>

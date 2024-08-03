@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-GZX8P5E1EC"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-GZX8P5E1EC');
+    </script>
+
+    <meta charset="utf-8">
+    <title>シンヤ タケウチ ワークス - StkFw - ネットワークテストソフトウェア</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="bootstrap-3.3.7-dist/css/bootstrap.min.css" rel="stylesheet" media="screen">
+</head>
+
+<body>
+
+    <div class="container">
+        <div style="height: 20px"></div>
+        <div>
+            <div class="col-xl-12">
+                <h1>StkFw 1.7.0</h1>
+                <div class="row ja">
+                    <h3>StkFw概要</h3>
+                    StkFwは，「複数のソフトウェア／ハードウェアがIPネットワーク上で連携し
+                    て動作する環境」をシミュレートするテスト支援ソフトウェアです。
+                    ネットワーク上の複雑で高価な要素（ソフトウェアやハードウェア）と相互接続／
+                    連携して動作するソフトウェアの開発で，各要素の振る舞いをテストプログラム化
+                    することにより開発対象ソフトウェアのテスト工数を削減する手法は一般に良く
+                    知られています。<br/>
+                    しかし，テストプログラムの振る舞い（他ネットワーク要素との遣り取り）が複雑
+                    な場合，テストプログラム開発のための初期投資費用が高くなる場合があります。<br/>
+                    StkFwは，優れたユーザーインターフェースにより，IPネットワーク上での
+                    データの送受信を簡易且つ詳細に制御できます。これにより実際にテストプログラム
+                    を開発しなくても，テストプログラムと同等の振る舞いをStkFwで実現する
+                    ことができ，ソフトウェアのテストに関わる工数を低減することができます。<br/>
+                    <img src="stkfw01.jpg" class="img-responsive" alt="stkfw01"/>
+
+                    <h3>システム要件</h3>
+                    StkFwは以下の環境で動作します。<br/>
+                    <ul>
+                    <li>動作に必要なCPU: 1GHz以上のクロック周波数で動作するCPU</li>
+                    <li>動作に必要なメモリ容量: 512MBytes以上</li>
+                    <li>導入に必要な空きディスク容量: 20MBytes以上</li>
+                    <li>サポートするオペレーティングシステム／エディション:<br/>
+                        Windows 10 (Only 64 bit edition)<br/>
+                        Windows Server 2016<br/>
+                        Windows Server 2019<br/>
+                    </li>
+                    </ul>
+
+                    <h3>変更履歴</h3>
+                    バージョン 1.5.0 ---> 1.6.0
+                    <ul>
+                    <li>TCP receiverの終了条件として，HTTPヘッダのContent-Lengthに指定されたサイ
+                        ズのデータ受信を新たにサポートした。
+                    <li>HTTPヘッダの追加および削除を可能にする処理要素を新たにサポートした。
+                    <li>Windows Server 2016をサポートした。
+                    </ul>
+                    バージョン 1.4.0 ---> 1.5.0
+                    <ul>
+                    <li>インストーラプログラム（ファイル）をひとつのMSIファイルに統合した。</li>
+                    <li>同一ポートで複数クライアントからの同時接続を可能にした。</li>
+                    <li>スレッド停止時に同じ受信要素が冗長なソケットクローズのログを出力する不良
+                        を対策した。</li>
+                    <li>/openまたは/startパラメータ指定で起動したときに，カレントフォルダが.std
+                        ファイルが配置されたフォルダと異なる不良を対策した。</li>
+                    <li>IPv6による接続をサポートした。</li>
+                    <li>Windows 8.1, Windows 10, Windows Server 2012 R2をサポートした。</li>
+                    </ul>
+                    バージョン 1.6.0 ---> 1.7.0
+                    <ul>
+                    <li>プロパティダイアログボックスでHTTPヘッダを編集中に，HTTPヘッダの一部が不
+                        正に削除される不具合を修正した。</li>
+                    <li>TCP receiverの終了条件として，HTTPヘッダの"Transfer-Encoding: chunked"の
+                        指定を新たにサポートした。</li>
+                    <li>レスポンスデータ内のHTTPヘッダ部をHTTP header処理要素が削除できない不具
+                        合を修正した。</li>
+                    <li>SSL/TLSによる接続をサポートした。</li>
+                    <li>Windows Server 2019をサポートした。</li>
+                    </ul>
+
+                    <h3>ダウンロード</h3>
+                    <p><a class="btn btn-primary btn-md" href="sfw170.zip" role="button">1.7.0 Release: 2020/11/23</a></p>
+                    <p><a class="btn btn-primary btn-md" href="sfw160.zip" role="button">1.6.0 Release: 2018/11/04</a></p>
+                    <p><a class="btn btn-primary btn-md" href="sfw150.zip" role="button">1.5.0 Release: 2015/12/10</a></p>
+
+                </div>
+            </div>
+        </div>
+        <div style="height: 50px"></div>
+    </div>
+
+    <script src="jquery-3.2.0.min.js"></script>
+    <script src="bootstrap-3.3.7-dist/js/bootstrap.min.js"></script>
+
+</body>
+</html>
