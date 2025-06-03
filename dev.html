@@ -360,6 +360,31 @@
                         # git clone -q --branch=master https://github.com/s-takeuchi/YaizuComLib.git /home/xxxx/dev<br>
                     </li>
                 </ol>    
+                <h3>Alma Linux 10.0 DVD</h3>
+                <ol>
+                    <li>
+                        Alma Linux 10.0 DVDをHyper-VのゲストOSとしてインストールする。Hyper-Vのネットワークアダプタの設定は、Default Switchを指定する。
+                        インストールオプションとして、ワークステーションを選択し、開発ツール、コンテナー管理、グラフィカル管理ツール、RPM開発ツールを指定する。
+                    </li>
+                    <li>
+                        /etc/sudoers の権限をchmod 660で変更し、ログインユーザーにsudo権限を与える。<br>
+                        > ## Allow user to run any commands anywhere<br>
+                        > takeuchi ALL=(ALL) ALL<br>
+                    </li>
+                    <li>
+                        OSSのバージョンを確認する。<br>
+                        gcc --version ==> 14.2.1<br>
+                        rpmbuild --version ==> 4.19.1.1<br>
+                        openssl version ==> 3.2.2<br>
+                        git version ==> 2.47.1
+                    </li>
+                    <li>
+                        gitでクローンを作成する。(事前にSSL検証を無効にする)<br>
+                        # git config --global http.sslVerify false<br>
+                        # git clone -q --branch=master https://github.com/s-takeuchi/YaizuComLib.git /home/xxxx/dev<br>
+                        clone実行時にPasswordを求められるので、Personal Access Token を指定する。
+                    </li>
+                </ol>    
             </div>
         </div>
 
