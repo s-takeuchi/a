@@ -23,7 +23,7 @@
         <div style="height: 20px"></div>
         <div>
             <div class="col-xl-12">
-                <h1>CmdFreak 1.2.0</h1>
+                <h1>CmdFreak 1.3.0</h1>
                 <div class="row ja">
                     <h3>CmdFreak概要</h3>
                     情報システムやアプリケーションソフトウェアの多くは，それらが持つデータの永続化機構としてRDBMS(リレーショナルデータベース管理システム) を用いており，
@@ -59,9 +59,13 @@
                     <ul><li>動作に必要なメモリ容量: 1GBytes以上</li></ul>
                     <ul><li>導入に必要な空きディスク容量: 20MBytes以上</li></ul>
                     <ul><li>サポートするオペレーティングシステム／エディション:<br/>
-                    Windows 10<br/>
-                    Windows Server 2016<br/>
-                    Windows Server 2019<br/>
+                    Windows 11<br>
+                    Windows Server 2022<br>
+                    Windows Server 2025<br>
+                    Red Hat Enterprise Linux 9<br>
+                    Red Hat Enterprise Linux 10<br>
+                    AlmaLinux 9<br>
+                    AlmaLinux 10<br>
                     </li></ul>
                     <ul><li>サポートするWebブラウザ:<br/>
                     Microsoft Internet Explorer 11<br/>
@@ -70,15 +74,21 @@
                     Mozilla Firefox<br/>
                     </li></ul>
                     <ul><li>サポートするDBMS:<br/>
-                    MySQL 5.7 (+ ODBC Driver: MySQL Connector/ODBC 5.3)<br/>
-                    MySQL 8.0 (+ ODBC Driver: MySQL Connector/ODBC 8.0)<br/>
-                    MariaDB 10.3 (+ ODBC Driver: MariaDB Connector/ODBC 3.0)<br/>
-                    MariaDB 10.4 (+ ODBC Driver: MariaDB Connector/ODBC 3.1)<br/>
-                    PostgreSQL 9.6 (+ ODBC Driver: psqlODBC 9.6)<br/>
-                    PostgreSQL 12.2 (+ ODBC Driver: psqlODBC 12.1)<br/>
+                    MySQL 8.4<br/>
+                    MariaDB 11.4<br/>
+                    MariaDB 11.8<br/>
+                    PostgreSQL 17<br/>
+                    PostgreSQL 18<br/>
+                    CmdFreakは、ODBC経由でDBMSに接続するため、接続するDBMSに対応するODBCドライバが別途必要となります。<br/>
                     </li></ul>
 
                     <h3>変更履歴</h3>
+                    バージョン 1.2.0 ---> 1.3.0
+                    <ul>
+                    <li>Linuxをサポートしました。</li>
+                    <li>x64 CPUアーキテクチャ向けに最適化しました。</li>
+                    <li>ODBC接続の安定性を向上しました。</li>
+                    </ul>
                     バージョン 1.1.0 ---> 1.2.0
                     <ul>
                     <li>GUIにスマートフォンでも見やすいレスポンシブデザインを採用しました。</li>
