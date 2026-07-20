@@ -1,0 +1,1153 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <libssh/libssh.h>
+#include <libssh/server.h>
+#include <libssh/sftp.h>
+
+#define SERVER_PORT 11111
+#define HOST_KEY_PATH "/home/takeuchi/.ssh/ssh_host_rsa_key"
+#define UPLOAD_ROOT "./sftp-root"
+#define MAX_SFTP_PACKET (16U * 1024U * 1024U)
+#define MAX_OPEN_HANDLES 32
+#define HANDLE_BYTES 4
+
+/* SFTP v3 packet types not guaranteed to be exposed by every libssh header. */
+#ifndef SSH_FXP_INIT
+#define SSH_FXP_INIT 1
+#define SSH_FXP_VERSION 2
+#define SSH_FXP_OPEN 3
+#define SSH_FXP_CLOSE 4
+#define SSH_FXP_READ 5
+#define SSH_FXP_WRITE 6
+#define SSH_FXP_LSTAT 7
+#define SSH_FXP_FSTAT 8
+#define SSH_FXP_SETSTAT 9
+#define SSH_FXP_FSETSTAT 10
+#define SSH_FXP_OPENDIR 11
+#define SSH_FXP_READDIR 12
+#define SSH_FXP_REMOVE 13
+#define SSH_FXP_MKDIR 14
+#define SSH_FXP_RMDIR 15
+#define SSH_FXP_REALPATH 16
+#define SSH_FXP_STAT 17
+#define SSH_FXP_RENAME 18
+#define SSH_FXP_STATUS 101
+#define SSH_FXP_HANDLE 102
+#define SSH_FXP_DATA 103
+#define SSH_FXP_NAME 104
+#define SSH_FXP_ATTRS 105
+#endif
+
+#ifndef SSH_FX_OK
+#define SSH_FX_OK 0
+#define SSH_FX_EOF 1
+#define SSH_FX_NO_SUCH_FILE 2
+#define SSH_FX_PERMISSION_DENIED 3
+#define SSH_FX_FAILURE 4
+#define SSH_FX_BAD_MESSAGE 5
+#define SSH_FX_NO_CONNECTION 6
+#define SSH_FX_CONNECTION_LOST 7
+#define SSH_FX_OP_UNSUPPORTED 8
+#endif
+
+#ifndef SSH_FXF_READ
+#define SSH_FXF_READ 0x00000001U
+#define SSH_FXF_WRITE 0x00000002U
+#define SSH_FXF_APPEND 0x00000004U
+#define SSH_FXF_CREAT 0x00000008U
+#define SSH_FXF_TRUNC 0x00000010U
+#define SSH_FXF_EXCL 0x00000020U
+#endif
+
+#ifndef SSH_FILEXFER_ATTR_SIZE
+#define SSH_FILEXFER_ATTR_SIZE 0x00000001U
+#define SSH_FILEXFER_ATTR_UIDGID 0x00000002U
+#define SSH_FILEXFER_ATTR_PERMISSIONS 0x00000004U
+#define SSH_FILEXFER_ATTR_ACMODTIME 0x00000008U
+#define SSH_FILEXFER_ATTR_EXTENDED 0x80000000U
+#endif
+
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+    size_t pos;
+} packet_reader;
+
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+} packet_writer;
+
+typedef struct {
+    int used;
+    int fd;
+    uint32_t open_flags;
+    char path[4096];
+} file_handle;
+
+static file_handle g_handles[MAX_OPEN_HANDLES];
+
+static const char *g_delay_stage = NULL;
+static unsigned int g_delay_seconds = 0;
+
+static void load_delay_settings(void)
+{
+    const char *stage = getenv("SFTP_TEST_DELAY_STAGE");
+    const char *seconds = getenv("SFTP_TEST_DELAY_SECONDS");
+
+    g_delay_stage = (stage != NULL && stage[0] != '\0') ? stage : NULL;
+    g_delay_seconds = 0;
+
+    if (seconds != NULL && seconds[0] != '\0') {
+        char *end = NULL;
+        unsigned long value = strtoul(seconds, &end, 10);
+        if (end != seconds && *end == '\0' && value <= UINT_MAX) {
+            g_delay_seconds = (unsigned int)value;
+        }
+    }
+}
+
+static void test_delay(const char *stage)
+{
+    if (g_delay_stage == NULL || g_delay_seconds == 0 ||
+        strcmp(g_delay_stage, stage) != 0) {
+        return;
+    }
+
+    printf("[TEST] Delaying stage '%s' for %u seconds...\n",
+           stage, g_delay_seconds);
+    fflush(stdout);
+
+    struct timespec request = {
+        .tv_sec = (time_t)g_delay_seconds,
+        .tv_nsec = 0
+    };
+
+    while (nanosleep(&request, &request) != 0 && errno == EINTR) {
+        /* Continue sleeping for the remaining interval. */
+    }
+
+    printf("[TEST] Delay finished at stage '%s'\n", stage);
+    fflush(stdout);
+}
+
+static uint32_t read_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) |
+           ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) |
+           (uint32_t)p[3];
+}
+
+static uint64_t read_be64(const uint8_t *p)
+{
+    return ((uint64_t)read_be32(p) << 32) | read_be32(p + 4);
+}
+
+static void write_be32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value >> 24);
+    p[1] = (uint8_t)(value >> 16);
+    p[2] = (uint8_t)(value >> 8);
+    p[3] = (uint8_t)value;
+}
+
+static void write_be64(uint8_t *p, uint64_t value)
+{
+    write_be32(p, (uint32_t)(value >> 32));
+    write_be32(p + 4, (uint32_t)value);
+}
+
+static int reader_u32(packet_reader *r, uint32_t *value)
+{
+    if (r->len - r->pos < 4) {
+        return -1;
+    }
+    *value = read_be32(r->data + r->pos);
+    r->pos += 4;
+    return 0;
+}
+
+static int reader_u64(packet_reader *r, uint64_t *value)
+{
+    if (r->len - r->pos < 8) {
+        return -1;
+    }
+    *value = read_be64(r->data + r->pos);
+    r->pos += 8;
+    return 0;
+}
+
+static int reader_string(packet_reader *r, const uint8_t **value, uint32_t *length)
+{
+    uint32_t n;
+    if (reader_u32(r, &n) != 0 || n > r->len - r->pos) {
+        return -1;
+    }
+    *value = r->data + r->pos;
+    *length = n;
+    r->pos += n;
+    return 0;
+}
+
+static int writer_reserve(packet_writer *w, size_t additional)
+{
+    size_t required;
+    uint8_t *new_data;
+
+    if (additional > SIZE_MAX - w->len) {
+        return -1;
+    }
+    required = w->len + additional;
+    if (required <= w->cap) {
+        return 0;
+    }
+
+    size_t new_cap = w->cap == 0 ? 256 : w->cap;
+    while (new_cap < required) {
+        if (new_cap > SIZE_MAX / 2) {
+            new_cap = required;
+            break;
+        }
+        new_cap *= 2;
+    }
+
+    new_data = realloc(w->data, new_cap);
+    if (new_data == NULL) {
+        return -1;
+    }
+    w->data = new_data;
+    w->cap = new_cap;
+    return 0;
+}
+
+static int writer_bytes(packet_writer *w, const void *data, size_t len)
+{
+    if (writer_reserve(w, len) != 0) {
+        return -1;
+    }
+    memcpy(w->data + w->len, data, len);
+    w->len += len;
+    return 0;
+}
+
+static int writer_u8(packet_writer *w, uint8_t value)
+{
+    return writer_bytes(w, &value, 1);
+}
+
+static int writer_u32(packet_writer *w, uint32_t value)
+{
+    uint8_t b[4];
+    write_be32(b, value);
+    return writer_bytes(w, b, sizeof(b));
+}
+
+static int writer_u64(packet_writer *w, uint64_t value)
+{
+    uint8_t b[8];
+    write_be64(b, value);
+    return writer_bytes(w, b, sizeof(b));
+}
+
+static int writer_string_n(packet_writer *w, const void *data, uint32_t len)
+{
+    return writer_u32(w, len) == 0 && writer_bytes(w, data, len) == 0 ? 0 : -1;
+}
+
+static int writer_string(packet_writer *w, const char *text)
+{
+    size_t len = strlen(text);
+    if (len > UINT32_MAX) {
+        return -1;
+    }
+    return writer_string_n(w, text, (uint32_t)len);
+}
+
+static int channel_read_all(ssh_channel channel, void *buffer, size_t length)
+{
+    uint8_t *p = buffer;
+    size_t done = 0;
+
+    while (done < length) {
+        uint32_t chunk = (uint32_t)((length - done) > UINT32_MAX ? UINT32_MAX : (length - done));
+        int n = ssh_channel_read(channel, p + done, chunk, 0);
+        if (n <= 0) {
+            return -1;
+        }
+        done += (size_t)n;
+    }
+    return 0;
+}
+
+static int channel_write_all(ssh_channel channel, const void *buffer, size_t length)
+{
+    const uint8_t *p = buffer;
+    size_t done = 0;
+
+    while (done < length) {
+        uint32_t chunk = (uint32_t)((length - done) > UINT32_MAX ? UINT32_MAX : (length - done));
+        int n = ssh_channel_write(channel, p + done, chunk);
+        if (n <= 0) {
+            return -1;
+        }
+        done += (size_t)n;
+    }
+    return 0;
+}
+
+static int send_packet(ssh_channel channel, const packet_writer *payload)
+{
+    uint8_t header[4];
+    if (payload->len > UINT32_MAX) {
+        return -1;
+    }
+    write_be32(header, (uint32_t)payload->len);
+    if (channel_write_all(channel, header, sizeof(header)) != 0) {
+        return -1;
+    }
+    return channel_write_all(channel, payload->data, payload->len);
+}
+
+static int send_status(ssh_channel channel, uint32_t id, uint32_t status,
+                       const char *message)
+{
+    packet_writer w = {0};
+    int rc = -1;
+
+    if (writer_u8(&w, SSH_FXP_STATUS) != 0 ||
+        writer_u32(&w, id) != 0 ||
+        writer_u32(&w, status) != 0 ||
+        writer_string(&w, message) != 0 ||
+        writer_string(&w, "") != 0) {
+        goto out;
+    }
+    rc = send_packet(channel, &w);
+out:
+    free(w.data);
+    return rc;
+}
+
+static int send_version(ssh_channel channel)
+{
+    packet_writer w = {0};
+    int rc = -1;
+    if (writer_u8(&w, SSH_FXP_VERSION) != 0 || writer_u32(&w, 3) != 0) {
+        goto out;
+    }
+    rc = send_packet(channel, &w);
+out:
+    free(w.data);
+    return rc;
+}
+
+static int send_handle(ssh_channel channel, uint32_t id, uint32_t handle_index)
+{
+    packet_writer w = {0};
+    uint8_t handle[HANDLE_BYTES];
+    int rc = -1;
+
+    write_be32(handle, handle_index);
+    if (writer_u8(&w, SSH_FXP_HANDLE) != 0 ||
+        writer_u32(&w, id) != 0 ||
+        writer_string_n(&w, handle, sizeof(handle)) != 0) {
+        goto out;
+    }
+    rc = send_packet(channel, &w);
+out:
+    free(w.data);
+    return rc;
+}
+
+static int writer_attrs(packet_writer *w, const struct stat *st)
+{
+    uint32_t flags = SSH_FILEXFER_ATTR_SIZE |
+                     SSH_FILEXFER_ATTR_PERMISSIONS |
+                     SSH_FILEXFER_ATTR_ACMODTIME;
+    return writer_u32(w, flags) == 0 &&
+           writer_u64(w, (uint64_t)st->st_size) == 0 &&
+           writer_u32(w, (uint32_t)st->st_mode) == 0 &&
+           writer_u32(w, (uint32_t)st->st_atime) == 0 &&
+           writer_u32(w, (uint32_t)st->st_mtime) == 0 ? 0 : -1;
+}
+
+static int send_attrs(ssh_channel channel, uint32_t id, const struct stat *st)
+{
+    packet_writer w = {0};
+    int rc = -1;
+    if (writer_u8(&w, SSH_FXP_ATTRS) != 0 ||
+        writer_u32(&w, id) != 0 ||
+        writer_attrs(&w, st) != 0) {
+        goto out;
+    }
+    rc = send_packet(channel, &w);
+out:
+    free(w.data);
+    return rc;
+}
+
+static int send_name(ssh_channel channel, uint32_t id, const char *name,
+                     const struct stat *st)
+{
+    packet_writer w = {0};
+    int rc = -1;
+
+    if (writer_u8(&w, SSH_FXP_NAME) != 0 ||
+        writer_u32(&w, id) != 0 ||
+        writer_u32(&w, 1) != 0 ||
+        writer_string(&w, name) != 0 ||
+        writer_string(&w, name) != 0) {
+        goto out;
+    }
+
+    if (st != NULL) {
+        if (writer_attrs(&w, st) != 0) {
+            goto out;
+        }
+    } else if (writer_u32(&w, 0) != 0) {
+        goto out;
+    }
+
+    rc = send_packet(channel, &w);
+out:
+    free(w.data);
+    return rc;
+}
+
+static int bytes_to_cstring(const uint8_t *data, uint32_t len, char *out, size_t out_size)
+{
+    if (out_size == 0 || len >= out_size || memchr(data, '\0', len) != NULL) {
+        return -1;
+    }
+    memcpy(out, data, len);
+    out[len] = '\0';
+    return 0;
+}
+
+static int normalize_remote_path(const char *remote, char *relative, size_t relative_size)
+{
+    const char *p = remote;
+    size_t out = 0;
+
+    while (*p == '/') {
+        ++p;
+    }
+
+    while (*p != '\0') {
+        const char *start = p;
+        size_t part_len;
+
+        while (*p != '\0' && *p != '/') {
+            ++p;
+        }
+        part_len = (size_t)(p - start);
+
+        if (part_len == 0 || (part_len == 1 && start[0] == '.')) {
+            /* Ignore duplicate separators and '.'. */
+        } else if (part_len == 2 && start[0] == '.' && start[1] == '.') {
+            return -1;
+        } else {
+            if (out != 0) {
+                if (out + 1 >= relative_size) {
+                    return -1;
+                }
+                relative[out++] = '/';
+            }
+            if (part_len >= relative_size - out) {
+                return -1;
+            }
+            memcpy(relative + out, start, part_len);
+            out += part_len;
+        }
+
+        while (*p == '/') {
+            ++p;
+        }
+    }
+
+    if (out == 0) {
+        if (relative_size < 2) {
+            return -1;
+        }
+        relative[out++] = '.';
+    }
+    relative[out] = '\0';
+    return 0;
+}
+
+static int local_path_from_remote(const char *remote, char *local, size_t local_size)
+{
+    char relative[4096];
+    int n;
+    if (normalize_remote_path(remote, relative, sizeof(relative)) != 0) {
+        return -1;
+    }
+    if (strcmp(relative, ".") == 0) {
+        n = snprintf(local, local_size, "%s", UPLOAD_ROOT);
+    } else {
+        n = snprintf(local, local_size, "%s/%s", UPLOAD_ROOT, relative);
+    }
+    return n >= 0 && (size_t)n < local_size ? 0 : -1;
+}
+
+static int canonical_remote_path(const char *remote, char *canonical, size_t size)
+{
+    char relative[4096];
+    int n;
+    if (normalize_remote_path(remote, relative, sizeof(relative)) != 0) {
+        return -1;
+    }
+    if (strcmp(relative, ".") == 0) {
+        n = snprintf(canonical, size, "/");
+    } else {
+        n = snprintf(canonical, size, "/%s", relative);
+    }
+    return n >= 0 && (size_t)n < size ? 0 : -1;
+}
+
+static int mkdir_if_missing(const char *path, mode_t mode)
+{
+    if (mkdir(path, mode) == 0 || errno == EEXIST) {
+        return 0;
+    }
+    return -1;
+}
+
+static int create_parent_directories(const char *path)
+{
+    char tmp[4096];
+    size_t len = strlen(path);
+
+    if (len >= sizeof(tmp)) {
+        return -1;
+    }
+    memcpy(tmp, path, len + 1);
+
+    for (char *p = tmp + 1; *p != '\0'; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir_if_missing(tmp, 0755) != 0) {
+                return -1;
+            }
+            *p = '/';
+        }
+    }
+    return 0;
+}
+
+static int alloc_handle(int fd, uint32_t open_flags, const char *path, uint32_t *index)
+{
+    for (uint32_t i = 1; i < MAX_OPEN_HANDLES; ++i) {
+        if (!g_handles[i].used) {
+            g_handles[i].used = 1;
+            g_handles[i].fd = fd;
+            g_handles[i].open_flags = open_flags;
+            snprintf(g_handles[i].path, sizeof(g_handles[i].path), "%s", path);
+            *index = i;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static file_handle *lookup_handle(const uint8_t *data, uint32_t len, uint32_t *index)
+{
+    uint32_t i;
+    if (len != HANDLE_BYTES) {
+        return NULL;
+    }
+    i = read_be32(data);
+    if (i == 0 || i >= MAX_OPEN_HANDLES || !g_handles[i].used) {
+        return NULL;
+    }
+    if (index != NULL) {
+        *index = i;
+    }
+    return &g_handles[i];
+}
+
+static void release_handle(uint32_t index)
+{
+    if (index > 0 && index < MAX_OPEN_HANDLES && g_handles[index].used) {
+        close(g_handles[index].fd);
+        memset(&g_handles[index], 0, sizeof(g_handles[index]));
+        g_handles[index].fd = -1;
+    }
+}
+
+static void release_all_handles(void)
+{
+    for (uint32_t i = 1; i < MAX_OPEN_HANDLES; ++i) {
+        release_handle(i);
+    }
+}
+
+static int errno_to_sftp_status(int error)
+{
+    switch (error) {
+    case ENOENT:
+    case ENOTDIR:
+        return SSH_FX_NO_SUCH_FILE;
+    case EACCES:
+    case EPERM:
+        return SSH_FX_PERMISSION_DENIED;
+    default:
+        return SSH_FX_FAILURE;
+    }
+}
+
+static int skip_attrs(packet_reader *r)
+{
+    uint32_t flags;
+    uint32_t count;
+    const uint8_t *ignored;
+    uint32_t ignored_len;
+
+    if (reader_u32(r, &flags) != 0) {
+        return -1;
+    }
+    if ((flags & SSH_FILEXFER_ATTR_SIZE) != 0) {
+        uint64_t value;
+        if (reader_u64(r, &value) != 0) return -1;
+    }
+    if ((flags & SSH_FILEXFER_ATTR_UIDGID) != 0) {
+        uint32_t value;
+        if (reader_u32(r, &value) != 0 || reader_u32(r, &value) != 0) return -1;
+    }
+    if ((flags & SSH_FILEXFER_ATTR_PERMISSIONS) != 0) {
+        uint32_t value;
+        if (reader_u32(r, &value) != 0) return -1;
+    }
+    if ((flags & SSH_FILEXFER_ATTR_ACMODTIME) != 0) {
+        uint32_t value;
+        if (reader_u32(r, &value) != 0 || reader_u32(r, &value) != 0) return -1;
+    }
+    if ((flags & SSH_FILEXFER_ATTR_EXTENDED) != 0) {
+        if (reader_u32(r, &count) != 0) return -1;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (reader_string(r, &ignored, &ignored_len) != 0 ||
+                reader_string(r, &ignored, &ignored_len) != 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int handle_open(ssh_channel channel, uint32_t id, packet_reader *r)
+{
+    const uint8_t *path_data;
+    uint32_t path_len;
+    uint32_t pflags;
+    char remote[4096];
+    char local[4096];
+    int oflags = 0;
+    int fd;
+    uint32_t handle_index;
+
+    if (reader_string(r, &path_data, &path_len) != 0 ||
+        reader_u32(r, &pflags) != 0 ||
+        skip_attrs(r) != 0 ||
+        bytes_to_cstring(path_data, path_len, remote, sizeof(remote)) != 0 ||
+        local_path_from_remote(remote, local, sizeof(local)) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid OPEN request");
+    }
+
+    if ((pflags & SSH_FXF_READ) && (pflags & SSH_FXF_WRITE)) {
+        oflags |= O_RDWR;
+    } else if (pflags & SSH_FXF_WRITE) {
+        oflags |= O_WRONLY;
+    } else {
+        oflags |= O_RDONLY;
+    }
+    if (pflags & SSH_FXF_APPEND) oflags |= O_APPEND;
+    if (pflags & SSH_FXF_CREAT) oflags |= O_CREAT;
+    if (pflags & SSH_FXF_TRUNC) oflags |= O_TRUNC;
+    if (pflags & SSH_FXF_EXCL) oflags |= O_EXCL;
+
+    if ((pflags & SSH_FXF_CREAT) != 0 && create_parent_directories(local) != 0) {
+        return send_status(channel, id, SSH_FX_FAILURE, "Failed to create parent directory");
+    }
+
+    fd = open(local, oflags, 0644);
+    if (fd < 0) {
+        int saved = errno;
+        fprintf(stderr, "[SFTP] OPEN failed: %s: %s\n", local, strerror(saved));
+        return send_status(channel, id, errno_to_sftp_status(saved), strerror(saved));
+    }
+
+    if (alloc_handle(fd, pflags, local, &handle_index) != 0) {
+        close(fd);
+        return send_status(channel, id, SSH_FX_FAILURE, "Too many open handles");
+    }
+
+    printf("[SFTP] OPEN id=%" PRIu32 " handle=%" PRIu32 " path=%s flags=0x%08" PRIx32 "\n",
+           id, handle_index, local, pflags);
+    return send_handle(channel, id, handle_index);
+}
+
+static int handle_write(ssh_channel channel, uint32_t id, packet_reader *r)
+{
+    const uint8_t *handle_data;
+    const uint8_t *file_data;
+    uint32_t handle_len;
+    uint32_t data_len;
+    uint64_t offset;
+    file_handle *h;
+    ssize_t written;
+
+    if (reader_string(r, &handle_data, &handle_len) != 0 ||
+        reader_u64(r, &offset) != 0 ||
+        reader_string(r, &file_data, &data_len) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid WRITE request");
+    }
+    h = lookup_handle(handle_data, handle_len, NULL);
+    if (h == NULL) {
+        return send_status(channel, id, SSH_FX_FAILURE, "Invalid handle");
+    }
+
+    size_t done = 0;
+    while (done < data_len) {
+        if (offset + done > (uint64_t)INT64_MAX) {
+            return send_status(channel, id, SSH_FX_FAILURE, "Offset too large");
+        }
+        written = pwrite(h->fd, file_data + done, data_len - done,
+                         (off_t)(offset + done));
+        if (written < 0) {
+            int saved = errno;
+            fprintf(stderr, "[SFTP] WRITE failed: %s: %s\n", h->path, strerror(saved));
+            return send_status(channel, id, errno_to_sftp_status(saved), strerror(saved));
+        }
+        if (written == 0) {
+            return send_status(channel, id, SSH_FX_FAILURE, "Short write");
+        }
+        done += (size_t)written;
+    }
+
+    printf("[SFTP] WRITE id=%" PRIu32 " bytes=%" PRIu32 " offset=%" PRIu64 " path=%s\n",
+           id, data_len, offset, h->path);
+    return send_status(channel, id, SSH_FX_OK, "OK");
+}
+
+static int handle_close(ssh_channel channel, uint32_t id, packet_reader *r)
+{
+    const uint8_t *handle_data;
+    uint32_t handle_len;
+    uint32_t index;
+    file_handle *h;
+
+    if (reader_string(r, &handle_data, &handle_len) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid CLOSE request");
+    }
+    h = lookup_handle(handle_data, handle_len, &index);
+    if (h == NULL) {
+        return send_status(channel, id, SSH_FX_FAILURE, "Invalid handle");
+    }
+    printf("[SFTP] CLOSE id=%" PRIu32 " handle=%" PRIu32 " path=%s\n", id, index, h->path);
+    release_handle(index);
+    return send_status(channel, id, SSH_FX_OK, "OK");
+}
+
+static int handle_stat_path(ssh_channel channel, uint32_t id, packet_reader *r, int follow)
+{
+    const uint8_t *path_data;
+    uint32_t path_len;
+    char remote[4096];
+    char local[4096];
+    struct stat st;
+
+    if (reader_string(r, &path_data, &path_len) != 0 ||
+        bytes_to_cstring(path_data, path_len, remote, sizeof(remote)) != 0 ||
+        local_path_from_remote(remote, local, sizeof(local)) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid path");
+    }
+
+    int rc = follow ? stat(local, &st) : lstat(local, &st);
+    if (rc != 0) {
+        int saved = errno;
+        return send_status(channel, id, errno_to_sftp_status(saved), strerror(saved));
+    }
+    return send_attrs(channel, id, &st);
+}
+
+static int handle_fstat(ssh_channel channel, uint32_t id, packet_reader *r)
+{
+    const uint8_t *handle_data;
+    uint32_t handle_len;
+    file_handle *h;
+    struct stat st;
+
+    if (reader_string(r, &handle_data, &handle_len) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid FSTAT request");
+    }
+    h = lookup_handle(handle_data, handle_len, NULL);
+    if (h == NULL) {
+        return send_status(channel, id, SSH_FX_FAILURE, "Invalid handle");
+    }
+    if (fstat(h->fd, &st) != 0) {
+        int saved = errno;
+        return send_status(channel, id, errno_to_sftp_status(saved), strerror(saved));
+    }
+    return send_attrs(channel, id, &st);
+}
+
+static int handle_realpath(ssh_channel channel, uint32_t id, packet_reader *r)
+{
+    const uint8_t *path_data;
+    uint32_t path_len;
+    char remote[4096];
+    char canonical[4096];
+    char local[4096];
+    struct stat st;
+    struct stat *st_ptr = NULL;
+
+    if (reader_string(r, &path_data, &path_len) != 0 ||
+        bytes_to_cstring(path_data, path_len, remote, sizeof(remote)) != 0 ||
+        canonical_remote_path(remote, canonical, sizeof(canonical)) != 0 ||
+        local_path_from_remote(remote, local, sizeof(local)) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid REALPATH request");
+    }
+    if (stat(local, &st) == 0) {
+        st_ptr = &st;
+    }
+    return send_name(channel, id, canonical, st_ptr);
+}
+
+static int handle_remove(ssh_channel channel, uint32_t id, packet_reader *r)
+{
+    const uint8_t *path_data;
+    uint32_t path_len;
+    char remote[4096];
+    char local[4096];
+
+    if (reader_string(r, &path_data, &path_len) != 0 ||
+        bytes_to_cstring(path_data, path_len, remote, sizeof(remote)) != 0 ||
+        local_path_from_remote(remote, local, sizeof(local)) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid REMOVE request");
+    }
+    if (unlink(local) != 0) {
+        int saved = errno;
+        return send_status(channel, id, errno_to_sftp_status(saved), strerror(saved));
+    }
+    return send_status(channel, id, SSH_FX_OK, "OK");
+}
+
+static int handle_mkdir(ssh_channel channel, uint32_t id, packet_reader *r)
+{
+    const uint8_t *path_data;
+    uint32_t path_len;
+    char remote[4096];
+    char local[4096];
+
+    if (reader_string(r, &path_data, &path_len) != 0 ||
+        bytes_to_cstring(path_data, path_len, remote, sizeof(remote)) != 0 ||
+        local_path_from_remote(remote, local, sizeof(local)) != 0 ||
+        skip_attrs(r) != 0) {
+        return send_status(channel, id, SSH_FX_BAD_MESSAGE, "Invalid MKDIR request");
+    }
+    if (mkdir(local, 0755) != 0 && errno != EEXIST) {
+        int saved = errno;
+        return send_status(channel, id, errno_to_sftp_status(saved), strerror(saved));
+    }
+    return send_status(channel, id, SSH_FX_OK, "OK");
+}
+
+static int process_sftp_packet(ssh_channel channel, const uint8_t *packet, size_t packet_len,
+                               int *initialized)
+{
+    packet_reader r = {packet, packet_len, 0};
+    uint8_t type;
+    uint32_t id;
+
+    if (packet_len < 1) {
+        return -1;
+    }
+    type = packet[r.pos++];
+
+    if (!*initialized) {
+        uint32_t client_version;
+        if (type != SSH_FXP_INIT || reader_u32(&r, &client_version) != 0) {
+            fprintf(stderr, "[SFTP] Expected INIT packet\n");
+            return -1;
+        }
+        printf("[SFTP] INIT client-version=%" PRIu32 ", selecting version 3\n", client_version);
+        *initialized = 1;
+        test_delay("init");
+        return send_version(channel);
+    }
+
+    if (reader_u32(&r, &id) != 0) {
+        return -1;
+    }
+
+    switch (type) {
+    case SSH_FXP_OPEN:
+        test_delay("open");
+        return handle_open(channel, id, &r);
+    case SSH_FXP_WRITE:
+        test_delay("write");
+        return handle_write(channel, id, &r);
+    case SSH_FXP_CLOSE:
+        test_delay("close");
+        return handle_close(channel, id, &r);
+    case SSH_FXP_STAT:
+        return handle_stat_path(channel, id, &r, 1);
+    case SSH_FXP_LSTAT:
+        return handle_stat_path(channel, id, &r, 0);
+    case SSH_FXP_FSTAT:
+        return handle_fstat(channel, id, &r);
+    case SSH_FXP_REALPATH:
+        return handle_realpath(channel, id, &r);
+    case SSH_FXP_REMOVE:
+        return handle_remove(channel, id, &r);
+    case SSH_FXP_MKDIR:
+        return handle_mkdir(channel, id, &r);
+    case SSH_FXP_SETSTAT:
+    case SSH_FXP_FSETSTAT:
+        /* libcurl may set timestamps after an upload. This minimal server accepts it. */
+        return send_status(channel, id, SSH_FX_OK, "OK");
+    default:
+        fprintf(stderr, "[SFTP] Unsupported packet type=%u id=%" PRIu32 "\n", type, id);
+        return send_status(channel, id, SSH_FX_OP_UNSUPPORTED, "Operation not supported");
+    }
+}
+
+static int run_sftp_protocol(ssh_session session, ssh_channel channel)
+{
+    int initialized = 0;
+    int rc = -1;
+
+    (void)session;
+    memset(g_handles, 0, sizeof(g_handles));
+    for (size_t i = 0; i < MAX_OPEN_HANDLES; ++i) {
+        g_handles[i].fd = -1;
+    }
+
+    if (mkdir_if_missing(UPLOAD_ROOT, 0755) != 0) {
+        perror("mkdir upload root");
+        return -1;
+    }
+
+    while (ssh_channel_is_open(channel) && !ssh_channel_is_eof(channel)) {
+        uint8_t header[4];
+        uint32_t packet_len;
+        uint8_t *packet;
+
+        if (channel_read_all(channel, header, sizeof(header)) != 0) {
+            if (ssh_channel_is_eof(channel)) {
+                rc = 0;
+            }
+            break;
+        }
+        packet_len = read_be32(header);
+        if (packet_len == 0 || packet_len > MAX_SFTP_PACKET) {
+            fprintf(stderr, "[SFTP] Invalid packet length: %" PRIu32 "\n", packet_len);
+            break;
+        }
+
+        packet = malloc(packet_len);
+        if (packet == NULL) {
+            fprintf(stderr, "[SFTP] Out of memory for packet size=%" PRIu32 "\n", packet_len);
+            break;
+        }
+        if (channel_read_all(channel, packet, packet_len) != 0) {
+            free(packet);
+            break;
+        }
+
+        if (process_sftp_packet(channel, packet, packet_len, &initialized) != 0) {
+            free(packet);
+            break;
+        }
+        free(packet);
+    }
+
+    release_all_handles();
+    return rc;
+}
+
+static int authenticate_client(ssh_session session)
+{
+    printf("[AUTH] Waiting for public-key authentication...\n");
+
+    for (;;) {
+        ssh_message message = ssh_message_get(session);
+        if (message == NULL) {
+            fprintf(stderr, "[AUTH] ssh_message_get failed: %s\n", ssh_get_error(session));
+            return -1;
+        }
+
+        if (ssh_message_type(message) == SSH_REQUEST_AUTH &&
+            ssh_message_subtype(message) == SSH_AUTH_METHOD_PUBLICKEY) {
+            const char *username = ssh_message_auth_user(message);
+            ssh_key key = ssh_message_auth_pubkey(message);
+
+            printf("[AUTH] Public-key request from user '%s'\n",
+                   username != NULL ? username : "(null)");
+
+            /*
+             * Test-server policy: accept any Ed25519 public key.
+             * Replace this with fingerprint/authorized_keys verification before real use.
+             */
+            if (key != NULL && ssh_key_type(key) == SSH_KEYTYPE_ED25519) {
+                if (ssh_message_auth_reply_success(message, 0) == SSH_OK) {
+                    ssh_message_free(message);
+                    printf("[AUTH] Authentication accepted (test policy)\n");
+                    return 0;
+                }
+            }
+        }
+
+        ssh_message_reply_default(message);
+        ssh_message_free(message);
+    }
+}
+
+static ssh_channel wait_for_sftp_channel(ssh_session session)
+{
+    ssh_channel channel = NULL;
+
+    printf("[SSH] Waiting for session channel and sftp subsystem request...\n");
+    for (;;) {
+        ssh_message message = ssh_message_get(session);
+        if (message == NULL) {
+            fprintf(stderr, "[SSH] ssh_message_get failed: %s\n", ssh_get_error(session));
+            return NULL;
+        }
+
+        if (ssh_message_type(message) == SSH_REQUEST_CHANNEL_OPEN &&
+            ssh_message_subtype(message) == SSH_CHANNEL_SESSION) {
+            if (channel == NULL) {
+                channel = ssh_message_channel_request_open_reply_accept(message);
+                if (channel != NULL) {
+                    printf("[SSH] Session channel accepted\n");
+                }
+            } else {
+                ssh_message_reply_default(message);
+            }
+            ssh_message_free(message);
+            continue;
+        }
+
+        if (ssh_message_type(message) == SSH_REQUEST_CHANNEL &&
+            ssh_message_subtype(message) == SSH_CHANNEL_REQUEST_SUBSYSTEM) {
+            const char *subsystem = ssh_message_channel_request_subsystem(message);
+            if (channel != NULL && subsystem != NULL && strcmp(subsystem, "sftp") == 0) {
+                if (ssh_message_channel_request_reply_success(message) != SSH_OK) {
+                    fprintf(stderr, "[SSH] Failed to accept sftp subsystem: %s\n",
+                            ssh_get_error(session));
+                    ssh_message_free(message);
+                    ssh_channel_free(channel);
+                    return NULL;
+                }
+                ssh_message_free(message);
+                printf("[SSH] SFTP subsystem accepted\n");
+                return channel;
+            }
+        }
+
+        ssh_message_reply_default(message);
+        ssh_message_free(message);
+    }
+}
+
+int main(void)
+{
+    ssh_bind bind = NULL;
+    ssh_session session = NULL;
+    ssh_channel channel = NULL;
+    int port = SERVER_PORT;
+    int verbosity = SSH_LOG_WARNING;
+    int exit_code = EXIT_FAILURE;
+
+    if (ssh_init() != SSH_OK) {
+        fprintf(stderr, "ssh_init failed\n");
+        return EXIT_FAILURE;
+    }
+
+    load_delay_settings();
+    if (g_delay_stage != NULL && g_delay_seconds > 0) {
+        printf("[TEST] Delay configured: stage=%s seconds=%u\n",
+               g_delay_stage, g_delay_seconds);
+    }
+
+    bind = ssh_bind_new();
+    session = ssh_new();
+    if (bind == NULL || session == NULL) {
+        fprintf(stderr, "Failed to allocate libssh objects\n");
+        goto cleanup;
+    }
+
+    if (ssh_bind_options_set(bind, SSH_BIND_OPTIONS_BINDPORT, &port) != SSH_OK ||
+        ssh_bind_options_set(bind, SSH_BIND_OPTIONS_HOSTKEY, HOST_KEY_PATH) != SSH_OK ||
+        ssh_bind_options_set(bind, SSH_BIND_OPTIONS_LOG_VERBOSITY, &verbosity) != SSH_OK) {
+        fprintf(stderr, "Failed to configure ssh_bind: %s\n", ssh_get_error(bind));
+        goto cleanup;
+    }
+
+    if (ssh_bind_listen(bind) != SSH_OK) {
+        fprintf(stderr, "ssh_bind_listen failed: %s\n", ssh_get_error(bind));
+        goto cleanup;
+    }
+
+    printf("[INIT] Listening on port %d\n", port);
+    printf("[INIT] Upload root: %s\n", UPLOAD_ROOT);
+
+    if (ssh_bind_accept(bind, session) != SSH_OK) {
+        fprintf(stderr, "ssh_bind_accept failed: %s\n", ssh_get_error(bind));
+        goto cleanup;
+    }
+
+    if (ssh_handle_key_exchange(session) != SSH_OK) {
+        fprintf(stderr, "ssh_handle_key_exchange failed: %s\n", ssh_get_error(session));
+        goto cleanup;
+    }
+    printf("[SSH] Key exchange completed\n");
+
+    if (authenticate_client(session) != 0) {
+        goto cleanup;
+    }
+
+    channel = wait_for_sftp_channel(session);
+    if (channel == NULL) {
+        goto cleanup;
+    }
+
+    if (run_sftp_protocol(session, channel) != 0) {
+        fprintf(stderr, "[SFTP] Session ended with an error: %s\n", ssh_get_error(session));
+        goto cleanup;
+    }
+
+    exit_code = EXIT_SUCCESS;
+
+cleanup:
+    release_all_handles();
+    if (channel != NULL) {
+        ssh_channel_send_eof(channel);
+        ssh_channel_close(channel);
+        ssh_channel_free(channel);
+    }
+    if (session != NULL) {
+        ssh_disconnect(session);
+        ssh_free(session);
+    }
+    if (bind != NULL) {
+        ssh_bind_free(bind);
+    }
+    ssh_finalize();
+    return exit_code;
+}
