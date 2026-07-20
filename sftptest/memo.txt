@@ -1,0 +1,173 @@
+はい、その理解でほぼ合っています。
+
+ただし、**「SFTPプロトコル上の主要な待ちポイント」は網羅していますが、「SSH全体のタイムアウトシナリオ」をすべて網羅したわけではありません。**
+
+整理すると次のようになります。
+
+| フェーズ             | 試験できるか | あなたのサーバ                  |
+| ---------------- | ------ | ------------------------ |
+| TCP接続            | ×      | OS(TCP)の世界               |
+| SSH Key Exchange | ×      | 未対応                      |
+| SSH認証            | △      | 遅延を追加すれば可能               |
+| Channel Open     | △      | 遅延を追加すれば可能               |
+| **SFTP INIT**    | ○      | `SFTP_DELAY_INIT`        |
+| **REALPATH**     | ×      | （追加可能）                   |
+| **OPEN**         | ○      | `SFTP_DELAY_OPEN`        |
+| **WRITE**        | ○      | `SFTP_DELAY_WRITE`       |
+| **CLOSE**        | ○      | `SFTP_DELAY_CLOSE`       |
+| EOF/切断           | ○      | `DISCONNECT_AFTER_WRITE` |
+
+つまり、
+
+**SFTPプロトコルが開始された後の主要な要求応答はほぼ網羅しています。**
+
+---
+
+## 私ならもう少しだけ追加します
+
+libcurlのタイムアウト検証という目的なら、あと3つ追加すると**ほぼ完全版**になります。
+
+### ① REALPATH遅延
+
+現在
+
+```text
+INIT
+↓
+REALPATH
+↓
+OPEN
+```
+
+となっています。
+
+ここに
+
+```text
+REALPATH
+    ↓
+sleep(20)
+    ↓
+NAME応答
+```
+
+を追加します。
+
+変数名は
+
+```text
+SFTP_DELAY_REALPATH
+```
+
+です。
+
+---
+
+### ② Channel Open遅延
+
+SSH認証後、
+
+```text
+CHANNEL OPEN
+```
+
+があります。
+
+ここで
+
+```text
+sleep(20)
+```
+
+を入れると
+
+```text
+SSHは繋がる
+SFTPはまだ始まらない
+```
+
+という試験ができます。
+
+---
+
+### ③ AUTH遅延
+
+認証成功前
+
+```text
+USERAUTH_REQUEST
+```
+
+に対して
+
+```text
+sleep(20)
+```
+
+を入れると
+
+```text
+SSH認証タイムアウト
+```
+
+も確認できます。
+
+---
+
+## すると最終形は
+
+```text
+TCP CONNECT
+        │
+        ▼
+SSH Key Exchange
+        │
+        ▼
+AUTH  ← delay_auth
+        │
+        ▼
+CHANNEL OPEN ← delay_channel
+        │
+        ▼
+SFTP INIT ← delay_init
+        │
+        ▼
+REALPATH ← delay_realpath
+        │
+        ▼
+OPEN ← delay_open
+        │
+        ▼
+WRITE ← delay_write
+        │
+        ▼
+CLOSE ← delay_close
+        │
+        ▼
+Disconnect
+```
+
+になります。
+
+---
+
+## これは価値があります
+
+実は、このサーバはもう単なるサンプルではありません。
+
+**「SSH/SFTPプロトコルの各応答を自由に遅延・異常化できる試験サーバ」**になっています。
+
+libcurlだけでなく
+
+* WinSCP
+* FileZilla
+* lftp
+* OpenSSH sftp
+* libssh2
+* libssh
+* Paramiko
+* JSch
+
+など、**あらゆるSFTPクライアントのタイムアウトや異常系試験**に利用できます。
+
+私なら、あと少し手を加えて **「SFTP Fault Injection Server」** として完成させます。今回のlibcurl調査が終わった後も、かなり長く活用できるテスト資産になると思います。
